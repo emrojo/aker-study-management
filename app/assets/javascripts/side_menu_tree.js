@@ -4,6 +4,10 @@
     this.attachHandlers();
   }
 
+  function alert(msg) {
+    $('#tree-hierarchy').prepend('<div class="alert alert-danger">'+msg+'</div>');
+  }
+
   var proto = SideMenuTree.prototype;
 
   proto.resetStatusMenu = function() {
@@ -12,6 +16,37 @@
     $('#edit-panel input').val('')
     $('#selected-node').val('');    
   };
+
+  proto.equalHierarchy = function(tree1, tree2) {
+    return false;
+    if ((!tree1 || !tree2) || (tree1.id !== tree2.id)) {
+      return false;
+    } else {
+      if (tree1.children && (tree1.children.length>0)) {
+        if (!((tree2.children) && (tree2.children.length>0))) {
+          return false;
+        }        
+        return tree1.children.every($.proxy(function(child) {
+          var child2 = tree2.children.filter(function(child2) {
+            return (child2.id == child.id);
+          })[0];
+          return (this.equalHierarchy(child, child2));
+        }, this));
+      }
+      return true;
+    }
+  }
+
+  proto.keepTreeUpdate = function() {
+    return $.get('/api/v1/nodes?include=nodes.parent', $.proxy(function(response, status, promise) {
+      var localTree = $('#tree-hierarchy').orgchart('getHierarchy');
+      var remoteTree = TreeBuilder.createFrom(response.data, true)[0]
+      if (!this.equalHierarchy(localTree, remoteTree) || !this.equalHierarchy(remoteTree, localTree)) {
+        return resetTree.call(this);
+        //return Promise.reject('Not up to date');
+      }
+    }, this)).fail($.proxy(onErrorConnection, this));
+  }
 
   proto.attachHandlers = function() {
     var loadSidebar = $.proxy(this.loadSidebar, this)
@@ -22,7 +57,22 @@
     })
     $(document).ready($.proxy(this.loadTree, this));
     $(document).on('turbolinks:load', $.proxy(this.loadTree, this));
+    $(document).ready($.proxy(this.attachMenuHandlers, this));
   };
+
+
+  proto.attachMenuHandlers = function() {
+    $('#btn-add-nodes').on('click', $.proxy(this.onAddNodes, this));
+
+    // Delete Button
+    $('#btn-delete-nodes').on('click', $.proxy(this.onDeleteNodes, this));
+
+    // Reset Button
+    $('#btn-reset').on('click', $.proxy(this.onResetNodes, this));
+
+    $('#editNodeModal').on('show.bs.modal', $.proxy(this.onUpdateNodes, this));    
+  };
+  
 
   proto.loadSidebar = function() {
     $.get('/api/v1/nodes?include=nodes.parent', function(response) {
@@ -50,11 +100,123 @@
         $('#side_menu_tree').treeview('clearSearch');
       }
     }, 300));
-  }
+  };
+
+  proto.onAddNodes = function() {
+    // Get the values of the new nodes and add them to the nodeVals array
+    var newNodeName = $('#new-node').val().trim();
+
+    // Get the data of the currently selected node
+    var $node = $('#selected-node').data('node');
+
+    if (newNodeName.length == 0 || !$node) {
+      return;
+    }
+    createNode.call(this, newNodeName, $node[0].id).then(function (response) {
+      // See https://github.com/dabeng/OrgChart#structure-of-datasource
+      var relationship = '';
+      var id = response['data']['id'];
+
+      $node.attr('id', id);
+      if (!hasChildren($node)) {
+        // Relationship will always be "has parent, no siblings, no children"
+        relationship = '100'
+
+        /*$('#chart-container').orgchart('addChildren', $node, {
+          'children': [{ name: newNodeName, relationship: relationship, id: id }]
+        });*/
+        $('#chart-container').orgchart('addChildren', $node, {
+          'children': [{ name: newNodeName, relationship: relationship, id: id }]
+        });    
+      } else {
+        // Relationship will always be "has parent, has sibling(s), no children"
+        relationship = '110'
+
+        $('#chart-container').orgchart('addSiblings', $node.closest('tr').siblings('.nodes').find('.node:first'),
+          {
+            'siblings': [{
+              'name': newNodeName,
+              'relationship': relationship,
+              'id': id
+            }]
+          }
+        );
+      }
+
+    }, function(error) {
+      error.responseJSON.errors.forEach(function(error) {
+        alert(error.detail);
+      });
+    });
+    $('#new-node').val('');
+  };
+
+
+  proto.onResetNodes = function() {
+    $('#selected-node').data('node', null).val('');
+    $('#new-node').val('');
+  };
+
+  proto.onDeleteNodes = function() {
+    var $node = $('#selected-node').data('node');
+    if ($node[0].id) {
+      deleteNode.call(this, $node[0].id).then( function (response) {
+        $('#chart-container').orgchart('removeNodes', $node);
+        $('#selected-node').data('node', null);
+      },
+      function() {
+        alert('Failed to delete the node');
+      });
+    }
+  };
+
+  proto.onUpdateNodes = function(e) {
+    // We get the nodeId of the currently selected node
+
+    var url = '/nodes/'+$('#selected-node').data('node')[0].id; 
+    /*var url = $('form', e.target).attr('action');
+    if (!url) {
+      var url = '/nodes/'+$('#selected-node').data('node')[0].id; 
+    }*/
+    //var nodeId = $('#selected-node').data('node')[0].id;
+
+    // We call jQuery's load method to fetch the html content of /nodes/:id/edit.js
+    // and load it into the modal body
+    $('div.modal-body', '#editNodeModal').load(url+ '/edit.js', function(response, status, xhr) {
+      $('form', 'div.modal-body')
+        .on('ajax:before', function() {
+          $(this).clear_form_errors();
+        })
+        .on('ajax:beforeSend', function(event, xhr, settings) {
+          xhr.setRequestHeader('Accept', 'application/json');
+        })
+        .on('ajax:success', function(e, data, status, xhr) {
+          // If the name has updated, we need to update the node
+          $('#selected-node').data('node').find('div.title').text(data['name']);
+          $('#selected-node').data('node').find('div.content').text(data['cost_code']);
+
+          // Show a success message
+          $('div.modal-body', '#editNodeModal').prepend('<div class="alert alert-success">Update successful</div>');
+
+          // Setting a timeout so the user can see the update was successful just before closing
+          // the modal window
+          setTimeout(function() {
+            $('#editNodeModal input').each(function(input) {
+              $(input).val('');
+            });
+            $('#editNodeModal').modal('hide');
+          }, 1000);
+        })
+        .on('ajax:error', function(e, data, status, xhr) {
+          $('form', 'div.modal-body').render_form_errors('node', data.responseJSON);
+        })
+    });
+
+  };
 
   proto.loadTree = function() {
     var self = this;
-    $.get('/api/v1/nodes?include=nodes.parent', $.proxy(function(response) {
+    return $.get('/api/v1/nodes?include=nodes.parent', $.proxy(function(response) {
       var programs = TreeBuilder.parentNodes(response.data);
       $('#tree-hierarchy').orgchart({
         'data' : TreeBuilder.createFrom(response.data, true)[0],
@@ -69,7 +231,9 @@
         // Callback function called every time a node is created
         createNode: function($node, data) {
           $('#selected-node').val('');
+          self.resetStatusMenu();
           $node.attr('title', data.name);
+          $node.attr('id', data.id);
           $node.on('click', function(event) {
             if (!$(event.target).is('.edge')) {
               $('#selected-node').val(data.name).data('node', $node);
@@ -110,105 +274,9 @@
         }, this)).fail($.proxy(onErrorConnection, this));
       }, this));
 
-      $('#btn-add-nodes').on('click', $.proxy(function() {
-        // Get the values of the new nodes and add them to the nodeVals array
-        var newNodeName = $('#new-node').val().trim();
+    }, this));
 
-        // Get the data of the currently selected node
-        var $node = $('#selected-node').data('node');
-
-        if (newNodeName.length == 0 || !$node) {
-          return;
-        }
-        createNode.call(this, newNodeName, $node[0].id).then(function (response) {
-
-          // See https://github.com/dabeng/OrgChart#structure-of-datasource
-          var relationship = '';
-          var id = response['data']['id'];
-
-          if (!hasChildren($node)) {
-            // Relationship will always be "has parent, no siblings, no children"
-            relationship = '100'
-
-            $('#chart-container').orgchart('addChildren', $node, {
-              'children': [{ name: newNodeName, relationship: relationship, id: id }]
-            });
-          } else {
-            // Relationship will always be "has parent, has sibling(s), no children"
-            relationship = '110'
-
-            $('#chart-container').orgchart('addSiblings', $node.closest('tr').siblings('.nodes').find('.node:first'),
-              {
-                'siblings': [{
-                  'name': newNodeName,
-                  'relationship': relationship,
-                  'id': id
-                }]
-              }
-            );
-          }
-
-        }, function(error) {
-          alert('Failed to create node')
-        });
-        $('#new-node').val('');
-      }, this));
-
-      // Delete Button
-      $('#btn-delete-nodes').on('click', $.proxy(function() {
-        var $node = $('#selected-node').data('node');
-        deleteNode($node[0].id).then( function (response) {
-          $('#chart-container').orgchart('removeNodes', $node);
-          $('#selected-node').data('node', null);
-        },
-        function() {
-          alert('Failed to delete the node');
-        })
-      }, this));
-
-      // Reset Button
-      $('#btn-reset').on('click', function() {
-        $('#selected-node').data('node', null).val('');
-        $('#new-node').val('');
-      })
-
-    }, this)).fail($.proxy(onErrorConnection, this));
-
-    $('#editNodeModal').on('show.bs.modal', function(e) {
-      // We get the nodeId of the currently selected node
-      var nodeId = $('#selected-node').data('node')[0].id;
-
-      // We call jQuery's load method to fetch the html content of /nodes/:id/edit.js
-      // and load it into the modal body
-      $('div.modal-body', '#editNodeModal').load('/nodes/' + nodeId + '/edit.js', function(response, status, xhr) {
-        $('form', 'div.modal-body')
-          .on('ajax:before', function() {
-            $(this).clear_form_errors();
-          })
-          .on('ajax:beforeSend', function(event, xhr, settings) {
-            xhr.setRequestHeader('Accept', 'application/json');
-          })
-          .on('ajax:success', function(e, data, status, xhr) {
-            // If the name has updated, we need to update the node
-            $('#selected-node').data('node').find('div.title').text(data['name']);
-            $('#selected-node').data('node').find('div.content').text(data['cost_code']);
-
-            // Show a success message
-            $('div.modal-body', '#editNodeModal').prepend('<div class="alert alert-success">Update successful</div>');
-
-            // Setting a timeout so the user can see the update was successful just before closing
-            // the modal window
-            setTimeout(function() {
-              $('#editNodeModal').modal('hide');
-            }, 1000);
-          })
-          .on('ajax:error', function(e, data, status, xhr) {
-            $('form', 'div.modal-body').render_form_errors('node', data.responseJSON);
-          })
-      });
-
-    });
-
+    //this.attachMenuHandlers();
   };
 
   function setIconChildren(node, val) {
@@ -243,56 +311,60 @@
   }
 
   function onErrorConnection() {
-    disableTree.call(this);
+    resetTree.call(this);
   }
 
   function disableTree() {
-    $('#tree-hierarchy').html('<div class="alert alert-danger">Sorry, we have lost connection with the server</div>');
+    $('#tree-hierarchy').html('<div class="alert alert-danger">Sorry, there was a problem while updating the server</div>');
     $('#tree-hierarchy').append('<button id="reconnect" class="button btn btn-default">Reconnect?</button>');
-    $('#reconnect').on('click', $.proxy(enableTree, this));
+    $('#reconnect').on('click', $.proxy(resetTree, this));
   }
 
-  function enableTree() {
+  function resetTree() {
     $('#tree-hierarchy').html('');
-    this.loadTree();    
+    return this.loadTree().fail($.proxy(disableTree, this));
   }
 
   function updateNode(id, event) {
-    $.ajax({
-      headers : {
-          'Accept' : 'application/vnd.api+json',
-          'Content-Type' : 'application/vnd.api+json'
-      },
-      url : '/api/v1/nodes/'+event.draggedNode[0].id+'/relationships/parent',
-      type : 'PATCH',
-      data : JSON.stringify({ data: { type: 'nodes', id: id }})
-    }).then(
-      $.proxy(onSuccessfulUpdateNode, this, id, event), 
-      $.proxy(onErrorConnection, this)
-    );
+    return this.keepTreeUpdate().then($.proxy(function() {
+      return $.ajax({
+        headers : {
+            'Accept' : 'application/vnd.api+json',
+            'Content-Type' : 'application/vnd.api+json'
+        },
+        url : '/api/v1/nodes/'+event.draggedNode[0].id+'/relationships/parent',
+        type : 'PATCH',
+        data : JSON.stringify({ data: { type: 'nodes', id: id }})
+      }).then($.proxy(onSuccessfulUpdateNode, this, id, event), $.proxy(onErrorConnection, this));
+    }, this));
   }
 
   function createNode(newName, parentId) {
-    return $.ajax({
-      headers : {
-          'Accept' : 'application/vnd.api+json',
-          'Content-Type' : 'application/vnd.api+json'
-      },
-      url : '/api/v1/nodes/',
-      type : 'POST',
-      data : JSON.stringify({ data: { type: 'nodes', attributes: { name: newName}, relationships: { parent: { data: { type: 'nodes', id: parentId }}} }})
-    }).fail($.proxy(onErrorConnection, this));
+    return this.keepTreeUpdate().then($.proxy(function() {
+      debugger;
+      return $.ajax({
+        headers : {
+            'Accept' : 'application/vnd.api+json',
+            'Content-Type' : 'application/vnd.api+json'
+        },
+        url : '/api/v1/nodes/',
+        type : 'POST',
+        data : JSON.stringify({ data: { type: 'nodes', attributes: { name: newName}, relationships: { parent: { data: { type: 'nodes', id: parentId }}} }})
+      }).fail($.proxy(onErrorConnection, this));
+    }, this));
   }
 
   function deleteNode(id) {
-    return $.ajax({
-       headers : {
-          'Accept' : 'application/vnd.api+json',
-          'Content-Type' : 'application/vnd.api+json'
-      },
-      url : '/api/v1/nodes/'+id,
-      type : 'DELETE'
-    }).fail($.proxy(onErrorConnection, this))
+    return this.keepTreeUpdate().then($.proxy(function() {
+      return $.ajax({
+         headers : {
+            'Accept' : 'application/vnd.api+json',
+            'Content-Type' : 'application/vnd.api+json'
+        },
+        url : '/api/v1/nodes/'+id,
+        type : 'DELETE'
+      }).fail($.proxy(onErrorConnection, this));
+    }, this));
   }
 
   // Determine whether parent has any children (based on its colspan???)
