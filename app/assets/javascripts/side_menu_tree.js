@@ -18,7 +18,6 @@
   };
 
   proto.equalHierarchy = function(tree1, tree2) {
-    return false;
     if ((!tree1 || !tree2) || (tree1.id !== tree2.id)) {
       return false;
     } else {
@@ -38,14 +37,20 @@
   }
 
   proto.keepTreeUpdate = function() {
+    var defer = $.Deferred();
     return $.get('/api/v1/nodes?include=nodes.parent', $.proxy(function(response, status, promise) {
       var localTree = $('#tree-hierarchy').orgchart('getHierarchy');
       var remoteTree = TreeBuilder.createFrom(response.data, true)[0]
       if (!this.equalHierarchy(localTree, remoteTree) || !this.equalHierarchy(remoteTree, localTree)) {
-        return resetTree.call(this);
+        resetTree.call(this);
+        defer.reject();
+        return defer;
         //return Promise.reject('Not up to date');
       }
+      defer.resolve();
+      return defer;
     }, this)).fail($.proxy(onErrorConnection, this));
+    return promise;
   }
 
   proto.attachHandlers = function() {
